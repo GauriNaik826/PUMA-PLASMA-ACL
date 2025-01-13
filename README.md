@@ -3,7 +3,7 @@ To request access to the PUMA Dataset, please follow the steps below:
 
 Send an email to gnaik826@gmail.com with the following information:
 
-1] Your affiliation or organization.   2] A brief description of your intended use of the dataset.
+1] Your affiliation or organization.\2] A brief description of your intended use of the dataset.
 
 
 ## Citation
