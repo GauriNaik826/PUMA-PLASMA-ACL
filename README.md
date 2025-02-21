@@ -1,9 +1,8 @@
-# PUMA Dataset Access
-To request access to the PUMA Dataset, please follow the steps below:
+# PUMA Dataset
+Following is the Link to the PUMA Dataset: 
 
-Send an email to gnaik826@gmail.com with the following information:
+https://huggingface.co/datasets/GauriNaik826/PUMA
 
-1] Your affiliation or organization.  2] A brief description of your intended use of the dataset.
 
 
 ## Citation
