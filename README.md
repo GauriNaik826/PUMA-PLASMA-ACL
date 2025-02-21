@@ -1,7 +1,5 @@
 # PUMA Dataset
-Following is the Link to the PUMA Dataset: 
-
-https://huggingface.co/datasets/GauriNaik826/PUMA
+ Access Request: To request access, please email gnaik826@gmail.com with your purpose for using the dataset and your affiliation.
 
 # Training
 To train the model, run:
