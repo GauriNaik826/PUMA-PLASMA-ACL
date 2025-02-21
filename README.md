@@ -3,6 +3,22 @@ Following is the Link to the PUMA Dataset:
 
 https://huggingface.co/datasets/GauriNaik826/PUMA
 
+# Training
+To train the model, run:
+python src/train.py
+
+# Evaluation
+To evaluate the model, run:
+python src/eval.py
+
+
+# Inference
+To run inference on a new sample:
+python src/infer.py 
+
+
+
+
 
 
 ## Citation
