@@ -1,0 +1,187 @@
+name: PUMA-PLASMA MLOps CI/CD
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - 'src/**'
+      - 'dvc.yaml'
+      - 'params.yaml'
+  workflow_dispatch:
+    inputs:
+      force_retrain:
+        description: 'Force full dvc repro even if no src changes'
+        required: false
+        default: 'false'
+
+env:
+  MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+  MODEL_NAME: puma-plasma-flant5
+  ROUGE_L_THRESHOLD: '0.30'
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # 1. Reproduce the DVC pipeline (only changed stages re-run)
+  # ─────────────────────────────────────────────────────────────────────────
+  dvc-repro:
+    name: DVC Reproduce Pipeline
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (for DVC S3 remote)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install DVC + S3 remote support
+        run: pip install dvc[s3]
+
+      - name: Pull DVC-tracked data from S3
+        run: dvc pull --run-cache
+
+      - name: Reproduce pipeline (skip unchanged stages)
+        run: |
+          if [ "${{ github.event.inputs.force_retrain }}" = "true" ]; then
+            dvc repro --force
+          else
+            dvc repro
+          fi
+
+      - name: Push updated artifacts back to S3
+        run: dvc push
+
+      - name: Upload generated summaries as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: inference-results
+          path: generated/summaries.csv
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 2. Quality gate — check ROUGE-L from MLflow; promote Staging → Production
+  #    eval.py already handles promotion; this job just confirms the gate passed.
+  # ─────────────────────────────────────────────────────────────────────────
+  quality-gate:
+    name: Quality Gate (ROUGE-L)
+    runs-on: ubuntu-latest
+    needs: dvc-repro
+    outputs:
+      gate_passed: ${{ steps.check.outputs.gate_passed }}
+      model_version: ${{ steps.check.outputs.model_version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install MLflow client
+        run: pip install mlflow
+
+      - name: Check if Staging model passes quality gate
+        id: check
+        env:
+          MLFLOW_TRACKING_URI: ${{ env.MLFLOW_TRACKING_URI }}
+        run: |
+          python - <<'EOF'
+          import mlflow, os, sys
+          from mlflow.tracking import MlflowClient
+
+          client = MlflowClient(os.environ["MLFLOW_TRACKING_URI"])
+          model_name = os.environ.get("MODEL_NAME", "puma-plasma-flant5")
+          threshold   = float(os.environ.get("ROUGE_L_THRESHOLD", "0.30"))
+
+          # Find the latest Staging version
+          staging_versions = client.get_latest_versions(model_name, stages=["Staging"])
+          if not staging_versions:
+              print("No Staging version found — pipeline may have skipped training (cache hit).")
+              # Try Production as a fallback (cache hit keeps existing champion)
+              prod_versions = client.get_latest_versions(model_name, stages=["Production"])
+              if prod_versions:
+                  print(f"Existing Production version: {prod_versions[0].version}")
+                  print(f"::set-output name=gate_passed::true")
+                  print(f"::set-output name=model_version::{prod_versions[0].version}")
+              else:
+                  print("::set-output name=gate_passed::false")
+                  print("::set-output name=model_version::none")
+              sys.exit(0)
+
+          version = staging_versions[0]
+          run = client.get_run(version.run_id)
+          rouge_l = run.data.metrics.get("rouge_l_fmeasure")
+
+          if rouge_l is None:
+              print("ROUGE-L not logged to this run — cannot validate.")
+              print("::set-output name=gate_passed::false")
+              print(f"::set-output name=model_version::{version.version}")
+              sys.exit(1)
+
+          print(f"Model v{version.version}  ROUGE-L={rouge_l:.4f}  threshold={threshold}")
+
+          if rouge_l >= threshold:
+              print("GATE PASSED — model is already promoted to Production by eval.py")
+              print("::set-output name=gate_passed::true")
+          else:
+              print("GATE FAILED — model does not meet quality threshold")
+              print("::set-output name=gate_passed::false")
+              sys.exit(1)
+
+          print(f"::set-output name=model_version::{version.version}")
+          EOF
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 3. Deploy — rolling restart the LLM service pod to load Production model
+  # ─────────────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy Production Model
+    runs-on: ubuntu-latest
+    needs: quality-gate
+    if: needs.quality-gate.outputs.gate_passed == 'true'
+
+    steps:
+      - name: Configure kubectl
+        uses: azure/k8s-set-context@v3
+        with:
+          method: kubeconfig
+          kubeconfig: ${{ secrets.KUBECONFIG }}
+
+      - name: Rolling restart LLM service (pulls Production model from MLflow on startup)
+        run: |
+          kubectl rollout restart deployment/llm-service -n puma-plasma
+          kubectl rollout status  deployment/llm-service -n puma-plasma --timeout=300s
+
+      - name: Verify pod health
+        run: |
+          kubectl get pods -n puma-plasma -l app=llm-service
+          echo "Deployment complete. LLM pods now serving model v${{ needs.quality-gate.outputs.model_version }}."
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # 4. Notify on failure
+  # ─────────────────────────────────────────────────────────────────────────
+  notify-failure:
+    name: Notify on Failure
+    runs-on: ubuntu-latest
+    needs: [dvc-repro, quality-gate, deploy]
+    if: failure()
+    steps:
+      - name: Post Slack notification
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": ":x: *PUMA-PLASMA MLOps pipeline failed* on branch `${{ github.ref_name }}`.\nCommit: ${{ github.sha }}\nSee: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

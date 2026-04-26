@@ -1,5 +1,8 @@
 import json
-import argparse 
+import argparse
+import mlflow
+import mlflow.artifacts
+from mlflow.tracking import MlflowClient
 from transformers.file_utils import PushToHubMixin
 from transformers import BartTokenizer, BartForConditionalGeneration,GPT2LMHeadModel,AutoModelForSeq2SeqLM,AutoTokenizer,BertTokenizer,BertModel
 from peft import get_peft_config, get_peft_model, get_peft_model_state_dict, PrefixTuningConfig, TaskType
@@ -223,9 +226,14 @@ if __name__=="__main__":
                         help="how many training epochs")
         parser.add_argument("--ckpt_dir", type=str, default=None)
         parser.add_argument("--ckpt_name", type=str, default=None)
-        
+        parser.add_argument("--mlflow_uri", type=str, default="http://localhost:5000")
+        parser.add_argument("--mlflow_experiment", type=str, default="puma-plasma-training")
+
         args = parser.parse_args()
-        
+
+        # ── MLflow setup ──────────────────────────────────────────────────────
+        mlflow.set_tracking_uri(args.mlflow_uri)
+        mlflow.set_experiment(args.mlflow_experiment)
 
         TRAIN_BATCH_SIZE = args.batch_size_train
         with open(args.train_file, 'r') as json_file:
@@ -236,102 +244,126 @@ if __name__=="__main__":
         LR = args.learning_rate
         WARMUP_STEPS = args.warmup_steps
         EPOCHS = args.num_epochs
-        best_loss = sys.float_info.max 
+        best_loss = sys.float_info.max
         last_epoch = 0
 
-       
         model = AutoModelForSeq2SeqLM.from_pretrained(args.model_file)
         tokenizer = AutoTokenizer.from_pretrained(args.model_file)
-       
-
 
         peft_config = PrefixTuningConfig(
-        task_type=TaskType.SEQ_2_SEQ_LM, 
-        inference_mode=False, 
-        num_virtual_tokens=8, 
-        token_dim=1024 
+            task_type=TaskType.SEQ_2_SEQ_LM,
+            inference_mode=False,
+            num_virtual_tokens=8,
+            token_dim=1024
         )
         peft_model = get_peft_model(model, peft_config)
         peft_model.print_trainable_parameters()
         model = peft_model
 
-                
-        train_dataset = CustomDataset(train_data,tokenizer)
-        eval_dataset = CustomDataset(valid_data,tokenizer)
-        train_dataloader, eval_dataloader = create_dataloader(train_dataset, eval_dataset,  VALID_BATCH_SIZE, TRAIN_BATCH_SIZE)
-        
+        train_dataset = CustomDataset(train_data, tokenizer)
+        eval_dataset = CustomDataset(valid_data, tokenizer)
+        train_dataloader, eval_dataloader = create_dataloader(train_dataset, eval_dataset, VALID_BATCH_SIZE, TRAIN_BATCH_SIZE)
 
-        # Define optimizer and learning rate scheduler
         optimizer = AdamW(model.parameters(), lr=LR)
         scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=WARMUP_STEPS, num_training_steps=len(train_dataloader) * EPOCHS)
 
         if args.ckpt_name is not None:
-                ckpt_path = f"{args.ckpt_dir}/{args.ckpt_name}.ckpt"
-                print("_________ckpt_path___________",ckpt_path)
-                if os.path.exists(ckpt_path):
-                
-                    print("Loading the trained checkpoint...")
-                    ckpt = torch.load(ckpt_path)
-                    model.load_state_dict(ckpt['model_state_dict'])
-        
-                    print(f"The training restarts with the specified checkpoint: {args.ckpt_name}.ckpt.")
-                    optimizer.load_state_dict(ckpt['optim_state_dict'])
-                    scheduler.load_state_dict(ckpt['sched_state_dict'])
-                    loss = ckpt['loss']
-                    last_epoch = ckpt['epoch']   
-                else:
-                    print(f"Cannot find the specified checkpoint {ckpt_path}.")
-    
-        start_epoch = last_epoch+1
+            ckpt_path = f"{args.ckpt_dir}/{args.ckpt_name}.ckpt"
+            print("_________ckpt_path___________", ckpt_path)
+            if os.path.exists(ckpt_path):
+                print("Loading the trained checkpoint...")
+                ckpt = torch.load(ckpt_path)
+                model.load_state_dict(ckpt['model_state_dict'])
+                print(f"The training restarts with the specified checkpoint: {args.ckpt_name}.ckpt.")
+                optimizer.load_state_dict(ckpt['optim_state_dict'])
+                scheduler.load_state_dict(ckpt['sched_state_dict'])
+                loss = ckpt['loss']
+                last_epoch = ckpt['epoch']
+            else:
+                print(f"Cannot find the specified checkpoint {ckpt_path}.")
+
+        start_epoch = last_epoch + 1
         num_batches = len(train_dataloader)
-
-       
         model.to(device)
-        # Fine-tuning loop
-        for epoch in range(start_epoch,start_epoch+ EPOCHS):
-            model.train()
-            print(f"#"*50 + f"Epoch: {epoch}" + "#"*50)
-            train_losses = []
-            for i,batch in enumerate(tqdm(train_dataloader)):
-                
-                input_ids = batch['input_ids'].to(device)
-                attention_mask = batch['attention_mask'].to(device)
-                labels =  batch["labels"].to(device)
-                
-                optimizer.zero_grad()
-                outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
-                custom_loss = compute_custom_loss(model,input_ids,attention_mask, batch["perspective"])
-             
-                loss = outputs.loss + custom_loss
-                loss.backward()
-                optimizer.step()
-                scheduler.step()
-                train_losses.append(loss.detach())
 
-            train_losses = [loss.item() for loss in train_losses] 
-            train_loss = np.mean(train_losses)
-            print(f"Train loss: {train_loss} for epoch : {epoch}")
-            list_loss_train.append(train_loss)
-            model.save_pretrained(f"{args.ckpt_dir}/best_ckpt_epoch={epoch}")
-           
-            valid_loss = validation(eval_dataloader, model, VALID_BATCH_SIZE, optimizer, scheduler)
+        # ── MLflow run — wraps the entire training loop ────────────────────
+        with mlflow.start_run(run_name=f"{args.model_file.split('/')[-1]}-prefix-tuning") as run:
 
-            if valid_loss < best_loss:
+            # Log all hyperparameters once
+            mlflow.log_params({
+                "base_model": args.model_file,
+                "learning_rate": LR,
+                "warmup_steps": WARMUP_STEPS,
+                "epochs": EPOCHS,
+                "batch_size_train": TRAIN_BATCH_SIZE,
+                "batch_size_valid": VALID_BATCH_SIZE,
+                "peft_num_virtual_tokens": 8,
+                "peft_token_dim": 1024,
+            })
+
+            # Fine-tuning loop
+            for epoch in range(start_epoch, start_epoch + EPOCHS):
+                model.train()
+                print(f"#"*50 + f"Epoch: {epoch}" + "#"*50)
+                train_losses = []
+                for i, batch in enumerate(tqdm(train_dataloader)):
+                    input_ids = batch['input_ids'].to(device)
+                    attention_mask = batch['attention_mask'].to(device)
+                    labels = batch["labels"].to(device)
+
+                    optimizer.zero_grad()
+                    outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+                    custom_loss = compute_custom_loss(model, input_ids, attention_mask, batch["perspective"])
+                    loss = outputs.loss + custom_loss
+                    loss.backward()
+                    optimizer.step()
+                    scheduler.step()
+                    train_losses.append(loss.detach())
+
+                train_losses = [loss.item() for loss in train_losses]
+                train_loss = np.mean(train_losses)
+                print(f"Train loss: {train_loss} for epoch : {epoch}")
+                list_loss_train.append(train_loss)
+
+                model.save_pretrained(f"{args.ckpt_dir}/best_ckpt_epoch={epoch}")
+                valid_loss = validation(eval_dataloader, model, VALID_BATCH_SIZE, optimizer, scheduler)
+
+                # Log per-epoch metrics to MLflow
+                mlflow.log_metrics({
+                    "train_loss": train_loss,
+                    "valid_loss": valid_loss,
+                }, step=epoch)
+
+                if valid_loss < best_loss:
                     best_loss = valid_loss
-                    state_dict = {
-                        'model_state_dict': model.state_dict(),
-                        'optim_state_dict': optimizer.state_dict(),
-                        'sched_state_dict': scheduler.state_dict(),
-                        'loss': best_loss,
-                        'epoch': last_epoch
-                    }
-                
-                    model.save_pretrained(f"{args.ckpt_dir}/best_ckpt_epoch={epoch}_valid_loss={round(best_loss, 4)}")
-                   
-            
-            
+                    best_ckpt_path = f"{args.ckpt_dir}/best_ckpt_epoch={epoch}_valid_loss={round(best_loss, 4)}"
+                    model.save_pretrained(best_ckpt_path)
 
-        
+                    # Log the best checkpoint artifacts and register in MLflow model registry
+                    mlflow.log_artifacts(best_ckpt_path, artifact_path="peft_adapter")
+                    mlflow.log_metric("best_valid_loss", best_loss, step=epoch)
+
+                    model_uri = f"runs:/{run.info.run_id}/peft_adapter"
+                    client = MlflowClient()
+                    try:
+                        client.create_registered_model("puma-plasma-flant5")
+                    except Exception:
+                        pass  # already exists
+                    mv = client.create_model_version(
+                        name="puma-plasma-flant5",
+                        source=model_uri,
+                        run_id=run.info.run_id,
+                        description=f"Epoch {epoch}, valid_loss={round(best_loss, 4)}",
+                    )
+                    # Transition new version to Staging — CI/CD promotes to Production after quality gate
+                    client.transition_model_version_stage(
+                        name="puma-plasma-flant5",
+                        version=mv.version,
+                        stage="Staging",
+                    )
+                    print(f"Model version {mv.version} registered in MLflow → Staging")
+
+
 
 
 

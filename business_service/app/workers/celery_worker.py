@@ -29,6 +29,7 @@ def run_inference(self, question: str, answers: list[str], perspective: str):
     summary = asyncio.get_event_loop().run_until_complete(call_llm_service(payload))
     summary_text = summary.get("summary", "")
 
-    log_interaction(prompt, summary_text, perspective)
+    ep_score = summary.get("ep_score")  # float forwarded by the LLM service
+    log_interaction(prompt, summary_text, perspective, ep_score=ep_score)
 
-    return {"summary": summary_text, "perspective": perspective}
+    return {"summary": summary_text, "perspective": perspective, "ep_score": ep_score}

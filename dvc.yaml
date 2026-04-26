@@ -1,0 +1,84 @@
+stages:
+
+  # ── Stage 1: Track raw data with DVC (pulls from S3 if not local) ──────
+  # Run: dvc pull  (not a dvc repro stage — data is tracked via .dvc files)
+
+  # ── Stage 2: Train the RoBERTa perspective classifier ──────────────────
+  train_classifier:
+    cmd: >
+      python src/classifier/train_classifier.py
+      --train_file data/train.json
+      --valid_file data/valid.json
+      --ckpt_dir   artifacts/classifier
+    deps:
+      - src/classifier/train_classifier.py
+      - src/classifier/classifier_dataloader.py
+      - data/train.json
+      - data/valid.json
+    outs:
+      - artifacts/classifier/checkpoint_classifier
+
+  # ── Stage 3: Train the FLAN-T5 summarization model ─────────────────────
+  train_model:
+    cmd: >
+      python src/train.py
+      --train_file       data/train.json
+      --valid_file       data/valid.json
+      --model_file       google/flan-t5-large
+      --batch_size_train 4
+      --batch_size_valid 2
+      --num_epochs       5
+      --learning_rate    1e-5
+      --warmup_steps     4000
+      --ckpt_dir         artifacts/llm
+      --mlflow_uri       ${MLFLOW_TRACKING_URI}
+      --mlflow_experiment puma-plasma-training
+    deps:
+      - src/train.py
+      - src/train_dataloader.py
+      - artifacts/classifier/checkpoint_classifier
+      - data/train.json
+      - data/valid.json
+    outs:
+      - artifacts/llm/
+    params:
+      - params.yaml:
+          - train.learning_rate
+          - train.warmup_steps
+          - train.epochs
+          - train.batch_size_train
+
+  # ── Stage 4: Run inference on test set ─────────────────────────────────
+  infer:
+    cmd: >
+      python src/infer.py
+      --test_file        data/test.json
+      --model_file       google/flan-t5-large
+      --batch_size_test  1
+      --num_epochs       5
+      --ckpt_dir         artifacts/llm
+      --ckpt_name        best_ckpt_epoch=4
+    deps:
+      - src/infer.py
+      - artifacts/llm/
+      - data/test.json
+    outs:
+      - generated/generated_result.csv
+
+  # ── Stage 5: Evaluate and log metrics → quality gate ───────────────────
+  evaluate:
+    cmd: >
+      python src/eval.py
+      --results_csv        generated/generated_result.csv
+      --mlflow_uri         ${MLFLOW_TRACKING_URI}
+      --mlflow_experiment  puma-plasma-evaluation
+      --run_name           eval-${GIT_SHA}
+      --rouge_l_threshold  0.30
+      --model_name         puma-plasma-flant5
+      --model_version      ${MODEL_VERSION}
+    deps:
+      - src/eval.py
+      - generated/generated_result.csv
+    metrics:
+      - metrics/eval_metrics.json:
+          cache: false

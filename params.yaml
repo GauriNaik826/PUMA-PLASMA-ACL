@@ -1,0 +1,12 @@
+# DVC pipeline parameters — referenced in dvc.yaml
+# Change these and run `dvc repro` to re-run only affected stages
+
+train:
+  learning_rate: 1e-5
+  warmup_steps: 4000
+  epochs: 5
+  batch_size_train: 4
+  batch_size_valid: 2
+
+eval:
+  rouge_l_threshold: 0.30   # minimum ROUGE-L F1 to promote model to Production
