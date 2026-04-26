@@ -1,0 +1,11 @@
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+pydantic>=2.7.0
+transformers>=4.41.0
+peft>=0.11.0
+torch>=2.3.0
+scipy
+rouge
+bert-score
+mlflow>=2.13.0
+bitsandbytes>=0.43.0   # optional: 8-bit quantisation

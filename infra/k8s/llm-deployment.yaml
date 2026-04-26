@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-service
+  labels:
+    app: llm-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-service
+  template:
+    metadata:
+      labels:
+        app: llm-service
+    spec:
+      containers:
+        - name: llm-service
+          image: puma-plasma/llm-service:latest
+          ports:
+            - containerPort: 8001
+          env:
+            - name: DEVICE
+              value: "cuda"
+            - name: BASE_MODEL_ID
+              value: "google/flan-t5-large"
+            - name: PEFT_CHECKPOINT
+              value: "/artifacts/llm"
+            - name: CLASSIFIER_CKPT
+              value: "/artifacts/classifier/checkpoint_classifier"
+            - name: MLFLOW_TRACKING_URI
+              value: "http://mlflow-service:5000"
+            - name: QUANTIZE
+              value: "1"
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: model-artifacts
+              mountPath: /artifacts
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 60
+            periodSeconds: 30
+      volumes:
+        - name: model-artifacts
+          persistentVolumeClaim:
+            claimName: model-artifacts-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-service
+spec:
+  selector:
+    app: llm-service
+  ports:
+    - protocol: TCP
+      port: 8001
+      targetPort: 8001
+  type: ClusterIP

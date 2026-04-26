@@ -34,13 +34,18 @@ def validation(valid_dataloader, model, VALID_BATCH_SIZE, optimizer, scheduler):
         return valid_loss 
 
 if __name__=="__main__":
-   
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--train_file', required=True)
+    parser.add_argument('--valid_file', required=True)
+    parser.add_argument('--ckpt_dir', type=str, default='./artifacts/classifier')
+    args = parser.parse_args()
+
     TRAIN_BATCH_SIZE = 8
-    with open('/home/gaurin/Summ_B/data/PREPROCESSED/preprocessed_train_data.json', 'r') as json_file:
+    with open(args.train_file, 'r') as json_file:
         train_data = json.load(json_file)
 
     VALID_BATCH_SIZE = 4
-    with open('/home/gaurin/Summ_B/data/PREPROCESSED/preprocessed_valid_data.json', 'r') as json_file:
+    with open(args.valid_file, 'r') as json_file:
         valid_data = json.load(json_file)
     
     LEARNING_RATE = 1e-05
@@ -105,7 +110,8 @@ if __name__=="__main__":
                     'epoch': last_epoch
                 }
                
-                torch.save(state_dict, f"./classifier/classifier_dataloader.py/best_ckpt_epoch={epoch}_valid_loss={round(best_loss, 4)}.ckpt")
+                os.makedirs(args.ckpt_dir, exist_ok=True)
+                torch.save(state_dict, f"{args.ckpt_dir}/checkpoint_classifier")
                 print("*"*10 + "Current best checkpoint is saved." + "*"*10)
               
         

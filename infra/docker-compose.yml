@@ -1,0 +1,75 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  business-service:
+    build: ./business_service
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - LLM_SERVICE_URL=http://llm-service:8001
+    depends_on:
+      - redis
+      - llm-service
+
+  celery-worker:
+    build: ./business_service
+    command: celery -A app.workers.celery_worker.celery_app worker --loglevel=info
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - LLM_SERVICE_URL=http://llm-service:8001
+    depends_on:
+      - redis
+      - llm-service
+
+  llm-service:
+    build: ./llm_service
+    ports:
+      - "8001:8001"
+    environment:
+      - DEVICE=cuda
+      - BASE_MODEL_ID=google/flan-t5-large
+      - PEFT_CHECKPOINT=/artifacts/llm
+      - CLASSIFIER_CKPT=/artifacts/classifier/checkpoint_classifier
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    volumes:
+      - ./artifacts:/artifacts
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.13.0
+    ports:
+      - "5000:5000"
+    command: mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:///mlflow.db --default-artifact-root /mlflow-artifacts
+    volumes:
+      - mlflow-data:/mlflow-artifacts
+
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    depends_on:
+      - prometheus
+
+volumes:
+  mlflow-data:

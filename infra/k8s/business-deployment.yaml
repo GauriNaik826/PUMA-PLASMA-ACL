@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: business-service
+  labels:
+    app: business-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: business-service
+  template:
+    metadata:
+      labels:
+        app: business-service
+    spec:
+      containers:
+        - name: business-service
+          image: puma-plasma/business-service:latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: REDIS_URL
+              value: "redis://redis-service:6379/0"
+            - name: LLM_SERVICE_URL
+              value: "http://llm-service:8001"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+        - name: celery-worker
+          image: puma-plasma/business-service:latest
+          command: ["celery", "-A", "app.workers.celery_worker.celery_app", "worker", "--loglevel=info"]
+          env:
+            - name: REDIS_URL
+              value: "redis://redis-service:6379/0"
+            - name: LLM_SERVICE_URL
+              value: "http://llm-service:8001"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: business-service
+spec:
+  selector:
+    app: business-service
+  ports:
+    - protocol: TCP
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP
